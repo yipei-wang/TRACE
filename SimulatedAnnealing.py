@@ -8,6 +8,9 @@ parser.add_argument("-path", "--data_path", default='ILSVRC2012_subset', type=st
 parser.add_argument("-idx", "--image_index", default=0, type=int, help="the index of the image")
 parser.add_argument("-model", "--model_name", default='resnet18', type=str, help="the name of the model to be explained")
 parser.add_argument("-ref", "--reference", default='zero', type=str, help="the type of reference values")
+parser.add_argument("-n", "--n_iteration", default=2000, type=str, help="the number of iterations")
+parser.add_argument("-m", "--mode", default='Le-Mo',type=str, help="the mode of the optimization")
+parser.add_argument("--verbose", default=False,action='store_true')
 parser.add_argument("--compare",default=False,action='store_true')
 parser.add_argument("-l", "--layer_name", default='layer4', type=str, help="the layer to be explained by GradCAM when compare==True")
 
@@ -19,22 +22,25 @@ import os
 import torch
 from dataset import load_data
 from utils import *
-from TRACE import greedy
+from TRACE import greedy, simulated_annealing
+import itertools
+
 
 torch.manual_seed(0)
 device = torch.device(f'cuda:{options.GPU_index}')
 IMAGE_SIZE = 224
+grid = options.edge**2
+candidates = list(itertools.combinations(range(grid), 2))
+nC2 = grid*(grid-1)//2
 
-
-model_func = getattr(torchvision.models, options.model_name, None)
 
 # Load the model if the model actually exists in torchvision.models
+model_func = getattr(torchvision.models, options.model_name, None)
 try:
     model = model_func(pretrained=True).to(device)
     model.eval()
 except:
     raise ValueError(f"Model {options.model_name} is not available in torchvision.models")
-    
 get_n_params(model)
 
 
@@ -47,15 +53,43 @@ print('Predicted by %s as class %d with confidence %.3f'%(options.model_name, pr
 plot_tensor_image(image)
 
 
-traj_mo, prob_mo = greedy(model, image, label, options, 'Mo')
-traj_le, prob_le = greedy(model, image, label, options, 'Le')
+## Use TRACE_Greedy as the initializations
+try:
+    with open('results/log_greedy_image%d_edge%d_%s_%s.txt'%(options.image_index,options.edge,options.model_name,options.reference), 'r') as f:
+        log = eval(f.read())
+    traj_init = np.array(log['traj_le'])
+    print("Loading the initial trajectory from logs")
+except:
+    print("Generating the initial trajectory")
+    traj_init = greedy(model, image, label, options, 'Le')[0]
+    
+    
+## Generate trajectories using simulated annealing
+traj = simulated_annealing( 
+    options,
+    model,
+    image,
+    label,
+    traj_init, 
+    candidates,
+    verbose = options.verbose,
+)            
+log = {
+    'image': options.image_index,
+    'edge': options.edge,
+    'mode': options.mode,
+    'model': options.model_name,
+    'reference': options.reference,
+    'traj': list(traj),
+}
+# To save the log
+with open('results/log_SA_image%d_edge%d_%s_%s_%s.txt'%(options.image_index, options.edge, options.mode, options.model_name, options.reference), 'w') as f:
+    f.write(str(log))
+    
+prob_le = traj_masking(model, image, label, traj, reference = options.reference, edge = options.edge)[0]
+prob_mo = traj_masking(model, image, label, np.flip(traj), reference = options.reference, edge = options.edge)[0]
 
-
-# Plot the deletion process
-
-
-show_traj(image, traj_mo, options, save='results/TRACE-Greedy_mo_image%d_edge%d_%s_%s_deletion_process.pdf'%(options.image_index+1, options.edge, options.model_name, options.reference))
-show_traj(image, traj_le, options, save='results/TRACE-Greedy_le_image%d_edge%d_%s_%s_deletion_process.pdf'%(options.image_index+1, options.edge, options.model_name, options.reference))
+show_traj(image, traj, options, save='results/TRACE-SA_image%d_edge%d_%s_%s_deletion_process.pdf'%(options.image_index+1, options.edge, options.model_name, options.reference))
 
 
 # Plot the deletion metric results for the single image
@@ -140,24 +174,6 @@ else:
     ax[1].set_ylabel('Predicted Probability')
 
     plt.legend()
-    plt.suptitle('The MoRF/LeRF deletion test of TRACE-Greedy on image %d'%(options.image_index+1))
-    plt.savefig('results/TRACE-Greedy_comparison_image%d_edge%d_%s_%s.pdf'%(options.image_index+1,options.edge,options.model_name,options.reference), bbox_inches='tight')
+    plt.suptitle('The MoRF/LeRF deletion test of TRACE-SA on image %d'%(options.image_index+1))
+    plt.savefig('results/TRACE-SA_comparison_image%d_edge%d_%s_%s.pdf'%(options.image_index+1,options.edge,options.model_name,options.reference), bbox_inches='tight')
     plt.show()
-    
-    
-log = {
-    'image': options.image_index,
-    'edge': options.edge,
-    'model': options.model_name,
-    'reference': options.reference,
-    'traj_le': list(traj_le),
-    'traj_mo': list(traj_mo),
-}
-
-# To save the log
-with open('results/log_greedy_image%d_edge%d_%s_%s.txt'%(options.image_index,options.edge,options.model_name,options.reference), 'w') as f:
-    f.write(str(log))
-    
-## To load the log
-# with open('results/log_greedy_image%d_edge%d_%s_%s.txt'%(options.image_index,options.edge,options.model_name,options.reference), 'r') as f:
-#     loaded_log = eval(f.read())

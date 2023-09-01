@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from torchvision import transforms
-from utils import masking
+from utils import masking, func, nC2_swap, kendall_distance
 
 IMAGE_SIZE=224
 
@@ -48,19 +48,19 @@ def greedy(model, image, label, options, mode = 'MoRF'):
             masked = torch.stack(masked)
             prob = torch.softmax(model(masked), dim = 1)[:, label]
             
-            if mode == 'LeRF':
+            if mode == 'Le':
                 argmax = prob.argmax().item()
                 traj.append(ids[argmax])
                 all_idx.remove(traj[-1])
                 Prob.append(prob.max().item())
                 new_image = masked[prob.argmax().item()].detach().clone()
-            elif mode == 'MoRF':
+            elif mode == 'Mo':
                 traj.append(ids[prob.argmin().item()])
                 all_idx.remove(traj[-1])
                 Prob.append(prob.min().item())
                 new_image = masked[prob.argmin().item()].detach().clone()
             else:
-                raise ValueError("mode has to be either 'MoRF' or 'LeRF'")  
+                raise ValueError("mode has to be either 'Mo' or 'Le'")  
              
                 
 #         masked = torch.zeros(1,channel,IMAGE_SIZE,IMAGE_SIZE).to(image.device)
@@ -82,3 +82,66 @@ def greedy(model, image, label, options, mode = 'MoRF'):
         traj.append(all_idx.pop())
         
     return np.array(traj), np.array(Prob)
+
+
+
+def simulated_annealing(
+    options,
+    model,
+    image,
+    label,
+    traj_init, 
+    candidates,
+    T = 0.05, 
+    eta = 0.998, 
+    threshold = 0., 
+    verbose = False
+):
+    
+    # Initialization
+    sol_0 = np.array(traj_init).copy()
+    ct_array = []
+    best = sol_0.copy()
+
+    score_best = -func(model, image, label, best, options)
+    score_0 = -func(model, image, label, sol_0, options)
+
+    print('start: ', score_best)
+    for t in range(1, options.n_iteration + 1):
+        temp = sol_0.copy()
+        sol_1 = nC2_swap(sol_0, candidates)
+
+        # energy
+        score_1 = -func(model, image, label, sol_1, options)
+        delta_t = score_1 - score_0
+        
+        if delta_t < 0:
+            sol_0 = sol_1.copy()
+            score_0 = score_1
+            ct_array.append(1)
+        else:
+            p = np.exp(-delta_t/T)
+            if np.random.uniform(0, 1) < p:
+                sol_0 = sol_1.copy()
+                score_0 = score_1
+                ct_array.append(1)
+            else:
+                ct_array.append(0)
+
+        if score_best > score_0:
+            best = sol_0.copy()
+            score_best = score_0
+            print('t: {}, score: {:.4f}, T: {:.4f} kendall onestep: {:.4f}, kendall overall: {:.4f}'.format(
+                t, score_best, T, kendall_distance(temp, sol_1),
+                kendall_distance(sol_0.argsort(), np.array(traj_init).argsort())
+            ))
+        elif ct_array[-1] == 1 and verbose:
+            print('t: {}, score: {:.4f}/{:.4f}, T: {:.4f} kendall onestep: {:.4f}, kendall overall: {:.4f}'.format(
+                t, score_0, score_best, T, kendall_distance(temp, sol_1),
+                kendall_distance(sol_0.argsort(), np.array(traj_init).argsort())
+            ))
+
+        if T > threshold:
+            T *= eta
+
+    return best

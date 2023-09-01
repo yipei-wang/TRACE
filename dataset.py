@@ -23,5 +23,3 @@ def load_data(options):
     image=Image.open(img_name).convert('RGB')
     label=labels[options.image_index]
     return transform(image), label
-
-

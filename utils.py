@@ -82,7 +82,7 @@ def plot_tensor_image(image, save=None):
         toshow = denorm(toshow).squeeze()
     
     if len(toshow.shape) == 4:
-        print("Plotting the entire batch:")
+        print("Plotting the entire batch")
         toshow = torchvision.utils.make_grid(toshow,nrow=10)
         figsize = (20,20)
     else:
@@ -93,6 +93,7 @@ def plot_tensor_image(image, save=None):
     plt.imshow(toshow.numpy().transpose((1,2,0)))
     plt.axis('off')
     if save is not None:
+        print(f"save at {save}")
         plt.savefig(save,bbox_inches='tight')
     plt.show()
     
@@ -185,26 +186,62 @@ def attribute(model, image, label, follow_prob = True, mode = 'top', reference =
         heatmap = F.interpolate(saliency, size = (image_size, image_size), mode = 'bilinear', align_corners = True)
         return saliency, heatmap
     
-def saliency_to_traj(saliency, mode = 'MoRF'):
-    if mode == 'MoRF':
+def saliency_to_traj(saliency, criterion = 'MoRF'):
+    if criterion == 'MoRF':
         return np.array(list(reversed(saliency.flatten().argsort()).detach().cpu().numpy()))
-    elif mode == 'LeRF':
+    elif criterion == 'LeRF':
         return np.array(list(saliency.flatten().argsort().detach().cpu().numpy()))
     
-def traj_masking(model, image, label, traj, reference = 'zero', edge = 8):
+def traj_masking(model, image, label, traj, reference = 'zero', edge = 7):
     model.eval()
     masked = image.detach().clone()
     with torch.no_grad():
         inputs = [masked[None]]
         for ids in traj:
             masked = masking(masked, reference, ids, edge = edge)
-#             masked = masked
             inputs.append(masked[None])
         inputs = torch.cat(inputs).to(image.device)
         prob = torch.softmax(model(inputs), dim = 1)
         return prob[:, label].detach().cpu().numpy(), inputs
 
 
+def show_attr(image, traj, index = 3):
+    attr = F.interpolate((torch.FloatTensor(np.array(traj).argsort() + 1).view(1,1,edge,edge)/grid)**index, 
+                         size = (image_size, image_size), mode = 'bilinear', align_corners = False)
+    fig, ax = plt.subplots(1,3)
+    ax[0].imshow(denorm(image).detach().cpu().numpy().squeeze().transpose((1,2,0)))
+    ax[0].axis('off')
+    ax[1].imshow(attr.squeeze(), cmap = 'jet')
+    ax[1].axis('off')
+    ax[2].imshow(denorm(image).detach().cpu().numpy().squeeze().transpose((1,2,0)))
+    ax[2].imshow(attr.squeeze(), cmap = 'jet', alpha = 0.3)
+    ax[2].axis('off')
+    plt.tight_layout()
+    plt.show()
+
+def func(model, image, label, traj, options):    
+    if options.mode == 'Le-Mo':
+        return traj_masking(model, image, label, traj, edge = options.edge, reference = options.reference)[0].sum() -\
+    traj_masking(model, image, label, reversed(traj), edge = options.edge, reference = options.reference)[0].sum()
+    
+    elif options.mode == 'Mo':
+        return traj_masking(model, image, label, traj, edge = options.edge, reference = options.reference)[0].sum()
+    elif options.mode == 'Le':
+        return -traj_masking(model, image, label, traj, edge = options.edge, reference = options.reference)[0].sum()
+    else:
+        print('WRONG MODE!')
+
+def nC2_swap(sol, candidates):
+    traj = sol.copy()
+    positions = list(candidates[np.random.randint(0, len(candidates))])
+    traj[positions] = np.flip(traj[positions])
+    return traj
 
 
 
+def kendall_distance(t1, t2):
+    n = len(t1)
+    i, j = np.meshgrid(np.arange(n), np.arange(n))
+    ndisordered = np.logical_or(np.logical_and(t1[i] < t1[j], t2[i] > t2[j]), 
+                                np.logical_and(t1[i] > t1[j], t2[i] < t2[j])).sum()
+    return ndisordered/2
